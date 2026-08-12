@@ -5,11 +5,11 @@ const SHELL_CSS = `
   position: relative; width: 100%; height: 100%; min-height: 240px;
   background: #000; overflow: hidden; isolation: isolate;
 }
-.pt-root video, .pt-root canvas.pt-overlay {
+.pt-root video, .pt-root img.pt-still, .pt-root canvas.pt-overlay {
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: cover; opacity: 0; transition: opacity 180ms ease-out;
 }
-.pt-root video { z-index: 1; background: #000; }
+.pt-root video, .pt-root img.pt-still { z-index: 1; background: #000; }
 .pt-root canvas.pt-overlay { z-index: 2; pointer-events: none; }
 .pt-boot {
   position: absolute; inset: 0; z-index: 4;
@@ -81,6 +81,8 @@ function ensureStyles(): void {
 export interface DomShell {
   root: HTMLElement;
   video: HTMLVideoElement;
+  /** Still-image element for `source: image` mode. */
+  image: HTMLImageElement;
   canvas: HTMLCanvasElement;
   boot: HTMLElement;
   bootMsg: HTMLElement;
@@ -89,10 +91,12 @@ export interface DomShell {
   placement: HTMLElement;
   setBootMessage(text: string, isError?: boolean): void;
   setCameraVisible(visible: boolean): void;
+  /** Show video preview, still image, or neither (boot only). */
+  setMediaMode(mode: 'video' | 'image' | 'none'): void;
   setWatermarkVisible(visible: boolean): void;
   setHud(text: string, debug: boolean): void;
   setPlacementVisible(visible: boolean, paddingPercent?: number): void;
-  applyMirror(facingMode: 'user' | 'environment'): void;
+  applyMirror(facingMode: 'user' | 'environment' | 'none'): void;
   destroy(): void;
 }
 
@@ -108,6 +112,7 @@ export function mountDomShell(
   root.className = 'pt-root';
   root.innerHTML = `
     <video playsinline muted autoplay></video>
+    <img class="pt-still" alt="" draggable="false" />
     <canvas class="pt-overlay"></canvas>
     <div class="pt-boot">
       <div class="pt-boot-powered">Powered by</div>
@@ -125,6 +130,7 @@ export function mountDomShell(
   host.appendChild(root);
 
   const video = root.querySelector('video') as HTMLVideoElement;
+  const image = root.querySelector('img.pt-still') as HTMLImageElement;
   const canvas = root.querySelector('canvas.pt-overlay') as HTMLCanvasElement;
   const boot = root.querySelector('.pt-boot') as HTMLElement;
   const bootMsg = root.querySelector('.pt-boot-msg') as HTMLElement;
@@ -135,6 +141,7 @@ export function mountDomShell(
   return {
     root,
     video,
+    image,
     canvas,
     boot,
     bootMsg,
@@ -146,10 +153,21 @@ export function mountDomShell(
       bootMsg.classList.toggle('is-error', isError);
     },
     setCameraVisible(visible) {
-      video.style.opacity = visible ? '1' : '0';
-      canvas.style.opacity = visible ? '1' : '0';
-      boot.classList.toggle('hide', visible);
-      if (!visible) {
+      if (visible) {
+        this.setMediaMode(image.src ? 'image' : 'video');
+      } else {
+        this.setMediaMode('none');
+      }
+    },
+    setMediaMode(mode) {
+      const showVideo = mode === 'video';
+      const showImage = mode === 'image';
+      const showMedia = showVideo || showImage;
+      video.style.opacity = showVideo ? '1' : '0';
+      image.style.opacity = showImage ? '1' : '0';
+      canvas.style.opacity = showMedia ? '1' : '0';
+      boot.classList.toggle('hide', showMedia);
+      if (!showMedia) {
         bootMsg.textContent = loadingText;
         bootMsg.classList.remove('is-error');
       }
@@ -174,6 +192,7 @@ export function mountDomShell(
     applyMirror(facingMode) {
       const t = facingMode === 'user' ? 'scaleX(-1)' : 'none';
       video.style.transform = t;
+      image.style.transform = 'none';
       canvas.style.transform = t;
     },
     destroy() {

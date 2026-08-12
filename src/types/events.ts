@@ -40,6 +40,7 @@ export type InitializationStep =
   | 'downloading'
   | 'warming'
   | 'accessing_webcam'
+  | 'loading_media'
   | 'loading_pose_model'
   | 'ready';
 
@@ -104,6 +105,8 @@ export interface ErrorEvent {
     | 'backend_fallback_wasm'
     | 'camera_denied'
     | 'camera_unavailable'
+    | 'media_load_failed'
+    | 'media_unavailable'
     | 'internal';
   message: string;
 }

@@ -9,6 +9,22 @@ import { fetchSkeletonDefinition } from './api/skeleton';
 import { deriveCacheSecret, openString, sealString } from './cache/obfuscate';
 import { openCameraStream, stopMediaStream } from './camera/getUserMedia';
 import {
+  imageBitmapToObjectUrl,
+  isImageBitmap,
+  isImageElement,
+  isVideoElement,
+  mediaSize,
+  resolveObjectUrl,
+  waitForImageReady,
+  waitForVideoReady,
+} from './media/resolveMedia';
+import {
+  normalizePoseSource,
+  type PoseEstimateInput,
+  type PoseSource,
+  type PoseSourceType,
+} from './types/source';
+import {
   EngineLoader,
   createWebFileStore,
   type EngineLoadResult,
@@ -89,6 +105,14 @@ export interface PoseTrackerClientOptions extends ConfigureOptions {
   onDiagnostic?: (message: string) => void;
   /** Alias of preload coldStart when using start(). Default full on camera screens. */
   coldStart?: ColdStartMode;
+  /**
+   * Input source. Default `{ type: 'camera' }` (webcam).
+   * Use `{ type: 'video', src }` or `{ type: 'image', src }` for file / URL / element.
+   */
+  source?: PoseSource | PoseSourceType;
+  /** Convenience with `source: 'video' | 'image'` (string / File / Blob). */
+  sourceUrl?: string;
+  sourceFile?: File | Blob;
 }
 
 /** @deprecated Prefer PoseTrackerClientOptions — kept for vanilla DX. */
@@ -152,6 +176,10 @@ export class PoseTrackerClient {
   private opts: PoseTrackerClientOptions;
   private shell: DomShell | null = null;
   private stream: MediaStream | null = null;
+  private poseSource: PoseSource = { type: 'camera' };
+  private objectUrlRevoke: (() => void) | null = null;
+  private estimateInput: PoseEstimateInput | null = null;
+  private imageShotPending = false;
   private adapter: PoseDetectorAdapter | null = null;
   private resolved: ResolvedPoseModel;
   private running = false;
@@ -185,6 +213,15 @@ export class PoseTrackerClient {
     this.resolved = resolvePoseModel({ model: options.model, modelUrl: options.modelUrl });
     this.skeletonDef = options.skeletonDef ?? null;
     this.coldStartMode = options.coldStart === 'full' ? 'full' : 'basic';
+    try {
+      this.poseSource = normalizePoseSource(options.source, {
+        sourceUrl: options.sourceUrl,
+        sourceFile: options.sourceFile,
+        facingMode: facingFromOptions(options),
+      });
+    } catch {
+      this.poseSource = { type: 'camera', facingMode: facingFromOptions(options) };
+    }
     this.files =
       options.fileStore !== undefined ? options.fileStore : createWebFileStore();
     this.engineLoader =
@@ -246,6 +283,11 @@ export class PoseTrackerClient {
 
   getColdStartMode(): ColdStartMode {
     return this.coldStartMode;
+  }
+
+  /** Active pose input source (`camera` | `video` | `image`). */
+  getSource(): PoseSource {
+    return this.poseSource;
   }
 
   addEventListener(listener: PoseTrackerEventListener): () => void {
@@ -323,31 +365,114 @@ export class PoseTrackerClient {
     return this.preload(options);
   }
 
-  /** Mount + load model + open camera + start loop (camera-screen convenience). */
+  /**
+   * Mount + load model + open source + start inference.
+   * Camera / video stream continuously; image runs a single shot (re-run with {@link analyze}).
+   */
   async start(): Promise<void> {
     if (this.disposed) throw new Error('PoseTracker disposed');
     if (!this.shell) throw new Error('Call mount() before start()');
-    await this.preload({ coldStart: this.opts.coldStart === 'basic' ? 'basic' : 'full' });
-    if (this.coldStartMode === 'basic') {
-      await this.ensureColdStartMode('full');
+    const needsMedia =
+      this.poseSource.type === 'camera' ||
+      this.poseSource.type === 'video' ||
+      this.poseSource.type === 'image';
+    await this.preload({
+      coldStart:
+        this.opts.coldStart === 'basic' && this.poseSource.type === 'camera'
+          ? 'basic'
+          : needsMedia
+            ? 'full'
+            : 'basic',
+    });
+    if (this.coldStartMode === 'basic' || !this.estimateInput) {
+      await this.ensureSource();
+    }
+    if (this.poseSource.type === 'image') {
+      this.imageShotPending = true;
     }
     this.beginLoop();
+  }
+
+  /**
+   * Switch input source. Stops the current media, attaches the new source, and
+   * restarts the loop when previously running.
+   */
+  async setSource(source: PoseSource | PoseSourceType, extras?: {
+    sourceUrl?: string;
+    sourceFile?: File | Blob;
+    facingMode?: 'user' | 'environment';
+  }): Promise<void> {
+    if (this.disposed) throw new Error('PoseTracker disposed');
+    const wasRunning = this.running;
+    this.stopMediaOnly();
+    this.poseSource = normalizePoseSource(source, {
+      sourceUrl: extras?.sourceUrl ?? this.opts.sourceUrl,
+      sourceFile: extras?.sourceFile ?? this.opts.sourceFile,
+      facingMode: extras?.facingMode ?? facingFromOptions(this.opts),
+    });
+    this.opts.source = this.poseSource;
+    if (this.poseSource.type === 'camera' && this.poseSource.facingMode) {
+      this.opts.facingMode = this.poseSource.facingMode;
+    }
+    if (!this.shell) return;
+    await this.ensureSource();
+    if (wasRunning || this.poseSource.type === 'image') {
+      if (this.poseSource.type === 'image') this.imageShotPending = true;
+      this.beginLoop();
+    }
+  }
+
+  /**
+   * Re-run pose estimation on the current still image (no-op for camera/video
+   * while the loop is already running — for those, call {@link start}).
+   */
+  async analyze(): Promise<Pose | null> {
+    if (this.disposed) throw new Error('PoseTracker disposed');
+    if (!this.shell) throw new Error('Call mount() before analyze()');
+    await this.ensureAdapter();
+    if (!this.estimateInput) await this.ensureSource();
+    if (this.poseSource.type === 'image') {
+      this.imageShotPending = true;
+      if (!this.running) this.beginLoop();
+      return null;
+    }
+    return this.runOneFrame();
   }
 
   stop(): void {
     this.running = false;
     this.loopToken += 1;
     this.busy = false;
-    stopMediaStream(this.stream);
-    this.stream = null;
+    this.imageShotPending = false;
+    this.stopMediaOnly();
     if (this.shell) {
-      this.shell.video.srcObject = null;
-      this.shell.setCameraVisible(false);
+      this.shell.setMediaMode('none');
       this.shell.setPlacementVisible(false);
       this.cameraRevealed = false;
       this.applyWatermark();
     }
     if (this.status !== 'error') this.setStatus('idle');
+  }
+
+  private stopMediaOnly(): void {
+    stopMediaStream(this.stream);
+    this.stream = null;
+    this.estimateInput = null;
+    if (this.objectUrlRevoke) {
+      this.objectUrlRevoke();
+      this.objectUrlRevoke = null;
+    }
+    if (this.shell) {
+      try {
+        this.shell.video.pause();
+      } catch {
+        /* ignore */
+      }
+      this.shell.video.removeAttribute('src');
+      this.shell.video.srcObject = null;
+      this.shell.video.load();
+      this.shell.image.removeAttribute('src');
+    }
   }
 
   async dispose(): Promise<void> {
@@ -643,7 +768,7 @@ export class PoseTrackerClient {
   private async ensureColdStartMode(mode: ColdStartMode): Promise<void> {
     if (mode !== 'full') return;
     if (!this.shell) return;
-    await this.ensureCamera();
+    await this.ensureSource();
   }
 
   private async ensureAdapter(): Promise<void> {
@@ -662,51 +787,110 @@ export class PoseTrackerClient {
     await this.adapter.load();
   }
 
-  private async ensureCamera(): Promise<void> {
-    if (!this.shell) throw new Error('Call mount() before opening the camera');
-    if (this.stream) return;
+  private async ensureSource(): Promise<void> {
+    if (!this.shell) throw new Error('Call mount() before opening a pose source');
+    const src = this.poseSource;
+
+    if (src.type === 'camera') {
+      if (this.stream && this.estimateInput) return;
+      this.emit({
+        type: 'initialization',
+        step: 'accessing_webcam',
+        message: 'accessing webcam (source=camera)',
+        ready: false,
+      });
+      try {
+        this.stream = await openCameraStream({
+          facingMode: src.facingMode ?? facingFromOptions(this.opts),
+          idealWidth: this.opts.idealWidth,
+          idealHeight: this.opts.idealHeight,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const denied = /NotAllowed|Permission|denied/i.test(msg);
+        this.reportError({
+          type: 'error',
+          code: denied ? 'camera_denied' : 'camera_unavailable',
+          message: msg,
+        });
+        this.shell.setBootMessage(
+          denied
+            ? 'Camera permission denied — allow access in the browser'
+            : 'Camera unavailable',
+          true,
+        );
+        throw err;
+      }
+      this.shell.video.srcObject = this.stream;
+      this.shell.applyMirror(src.facingMode ?? facingFromOptions(this.opts));
+      this.shell.setMediaMode('video');
+      try {
+        await this.shell.video.play();
+      } catch {
+        /* autoplay */
+      }
+      this.estimateInput = this.shell.video;
+      this.scheduleReveal('camera');
+      void this.handleCameraStart({
+        backend: this.acceleration.backend ?? 'webgl',
+        profileId: null,
+      });
+      return;
+    }
+
+    if (src.type === 'video') {
+      this.emit({
+        type: 'initialization',
+        step: 'loading_media',
+        message: 'loading video (source=video)',
+        ready: false,
+      });
+      try {
+        await this.attachVideoSource(src.src, {
+          autoplay: src.autoplay !== false,
+          loop: src.loop !== false,
+          muted: src.muted !== false,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.reportError({ type: 'error', code: 'media_load_failed', message: msg });
+        this.shell.setBootMessage('Could not load video source', true);
+        throw err;
+      }
+      this.shell.applyMirror('none');
+      this.shell.setMediaMode('video');
+      this.scheduleReveal('video');
+      return;
+    }
+
+    // image
     this.emit({
       type: 'initialization',
-      step: 'accessing_webcam',
-      message: 'accessing webcam',
+      step: 'loading_media',
+      message: 'loading image (source=image)',
       ready: false,
     });
     try {
-      this.stream = await openCameraStream({
-        facingMode: facingFromOptions(this.opts),
-        idealWidth: this.opts.idealWidth,
-        idealHeight: this.opts.idealHeight,
-      });
+      await this.attachImageSource(src.src);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const denied = /NotAllowed|Permission|denied/i.test(msg);
-      this.reportError({
-        type: 'error',
-        code: denied ? 'camera_denied' : 'camera_unavailable',
-        message: msg,
-      });
-      this.shell.setBootMessage(
-        denied
-          ? 'Camera permission denied — allow access in the browser'
-          : 'Camera unavailable',
-        true,
-      );
+      this.reportError({ type: 'error', code: 'media_load_failed', message: msg });
+      this.shell.setBootMessage('Could not load image source', true);
       throw err;
     }
-    this.shell.video.srcObject = this.stream;
-    this.shell.applyMirror(facingFromOptions(this.opts));
-    try {
-      await this.shell.video.play();
-    } catch {
-      /* autoplay */
-    }
+    this.shell.applyMirror('none');
+    this.shell.setMediaMode('image');
+    this.scheduleReveal('image');
+  }
+
+  private scheduleReveal(kind: string): void {
     const started = Date.now();
     const tick = (): void => {
       this.revealCamera();
       if (this.cameraRevealed) return;
       if (Date.now() - started > 8000) {
         this.shell?.setBootMessage(
-          'camera started but preview is empty — check permissions',
+          `${kind} loaded but preview is empty — check the file or CORS`,
           true,
         );
         return;
@@ -714,11 +898,81 @@ export class PoseTrackerClient {
       setTimeout(tick, 120);
     };
     setTimeout(tick, 60);
+  }
 
-    void this.handleCameraStart({
-      backend: this.acceleration.backend ?? 'webgl',
-      profileId: null,
-    });
+  private async attachVideoSource(
+    src: string | File | Blob | HTMLVideoElement,
+    opts: { autoplay: boolean; loop: boolean; muted: boolean },
+  ): Promise<void> {
+    if (!this.shell) throw new Error('no shell');
+    const video = this.shell.video;
+    if (isVideoElement(src)) {
+      // Prefer playing the host element in-place when already in the page;
+      // otherwise copy its currentSrc into our shell video.
+      if (src.parentElement && src !== video) {
+        this.estimateInput = src;
+        if (opts.autoplay) {
+          try {
+            await src.play();
+          } catch {
+            /* autoplay */
+          }
+        }
+        await waitForVideoReady(src);
+        return;
+      }
+      if (src.srcObject) {
+        video.srcObject = src.srcObject;
+      } else if (src.currentSrc || src.src) {
+        video.src = src.currentSrc || src.src;
+      }
+    } else {
+      const resolved = await resolveObjectUrl(src);
+      this.objectUrlRevoke = resolved.revoke;
+      video.src = resolved.url;
+    }
+    video.loop = opts.loop;
+    video.muted = opts.muted;
+    video.playsInline = true;
+    await waitForVideoReady(video);
+    if (opts.autoplay) {
+      try {
+        await video.play();
+      } catch {
+        /* autoplay */
+      }
+    }
+    this.estimateInput = video;
+  }
+
+  private async attachImageSource(
+    src: string | File | Blob | HTMLImageElement | ImageBitmap,
+  ): Promise<void> {
+    if (!this.shell) throw new Error('no shell');
+    if (isImageBitmap(src)) {
+      const resolved = await imageBitmapToObjectUrl(src);
+      this.objectUrlRevoke = resolved.revoke;
+      this.shell.image.src = resolved.url;
+      await waitForImageReady(this.shell.image);
+      this.estimateInput = src;
+      return;
+    }
+    if (isImageElement(src)) {
+      if (src.complete && src.naturalWidth > 0) {
+        this.shell.image.src = src.currentSrc || src.src;
+        this.estimateInput = src;
+        return;
+      }
+      await waitForImageReady(src);
+      this.shell.image.src = src.currentSrc || src.src;
+      this.estimateInput = src;
+      return;
+    }
+    const resolved = await resolveObjectUrl(src);
+    this.objectUrlRevoke = resolved.revoke;
+    this.shell.image.src = resolved.url;
+    await waitForImageReady(this.shell.image);
+    this.estimateInput = this.shell.image;
   }
 
   private beginLoop(): void {
@@ -727,84 +981,135 @@ export class PoseTrackerClient {
     void this.loop(++this.loopToken);
   }
 
+  private frameReady(input: PoseEstimateInput): boolean {
+    const size = mediaSize(
+      input as HTMLVideoElement | HTMLImageElement | ImageBitmap,
+    );
+    if (!(size.width > 0 && size.height > 0)) return false;
+    if (isVideoElement(input)) {
+      if (input.readyState < 2) return false;
+      // Skip inference while a file video is paused/ended (camera streams stay live).
+      if (this.poseSource.type === 'video' && (input.paused || input.ended)) return false;
+    }
+    return true;
+  }
+
+  private async runOneFrame(): Promise<Pose | null> {
+    if (!this.adapter || !this.shell || !this.estimateInput) return null;
+    if (!this.frameReady(this.estimateInput)) return null;
+    const input = this.estimateInput;
+    const dispW = this.shell.canvas.clientWidth || this.shell.root.clientWidth || 1;
+    const dispH = this.shell.canvas.clientHeight || this.shell.root.clientHeight || 1;
+    const facing =
+      this.poseSource.type === 'camera' ? facingFromOptions(this.opts) : 'environment';
+    const result = await this.adapter.estimate(input, {
+      facingMode: facing,
+      displayWidth: dispW,
+      displayHeight: dispH,
+    });
+    if (!result) return null;
+    const ctx = this.shell.canvas.getContext('2d');
+    if (ctx && this.opts.drawSkeleton !== false) {
+      const mapped = mapVideoKeypointsToDisplay(
+        result.videoKeypoints,
+        result.letterbox,
+        dispW,
+        dispH,
+      );
+      paintSkeleton(ctx, mapped, dispW, dispH, true, this.skeletonDef);
+    } else if (ctx && this.opts.drawSkeleton === false) {
+      ctx.clearRect(0, 0, dispW, dispH);
+    }
+    const pose: Pose = {
+      keypoints: result.keypoints,
+      score: result.score,
+      timestampMs: Date.now(),
+    };
+    this.ingestPose(pose);
+    this.inferMs.push(result.inferenceMs);
+    if (this.inferMs.length > 30) this.inferMs.shift();
+    this.fpsWindow += 1;
+    const now = performance.now();
+    if (now - this.fpsTimer >= 1000) {
+      const fps = this.fpsWindow;
+      this.fpsWindow = 0;
+      this.fpsTimer = now;
+      const med = median(this.inferMs);
+      this.acceleration.medianInferenceMs = med;
+      const above = result.keypoints.filter((k) => k.score >= 0.3).length;
+      const backend =
+        'getBackend' in this.adapter &&
+        typeof (this.adapter as { getBackend?: () => string | null }).getBackend === 'function'
+          ? (this.adapter as { getBackend: () => string | null }).getBackend()
+          : null;
+      this.acceleration.backend = backend;
+      const size = mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap);
+      if (this.opts.debugHud) {
+        this.shell.setHud(
+          `${this.resolved.modelId} · ${this.poseSource.type} · ${backend ?? '?'} · ${fps} fps · ${
+            med != null ? Math.round(med) + ' ms' : '?'
+          } · kp≥0.3=${above}/17`,
+          true,
+        );
+      }
+      this.emit({
+        type: 'stats',
+        fps,
+        medianInferenceMs: med,
+        backend,
+        keypointsAbove03: above,
+        meanScore: result.score,
+        videoSize: `${size.width}x${size.height}`,
+        timestampMs: Date.now(),
+      });
+    }
+    this.revealCamera();
+    return pose;
+  }
+
   private async loop(token: number): Promise<void> {
     if (token !== this.loopToken || !this.running || !this.adapter || !this.shell || this.disposed) {
       return;
     }
-    const video = this.shell.video;
-    if (!this.busy && video.readyState >= 2 && video.videoWidth > 0) {
+    const input = this.estimateInput;
+    const shouldInfer =
+      !!input &&
+      !this.busy &&
+      this.frameReady(input) &&
+      (this.poseSource.type !== 'image' || this.imageShotPending);
+
+    if (shouldInfer) {
       this.busy = true;
       try {
-        const dispW = this.shell.canvas.clientWidth || this.shell.root.clientWidth || 1;
-        const dispH = this.shell.canvas.clientHeight || this.shell.root.clientHeight || 1;
-        const result = await this.adapter.estimate(video, {
-          facingMode: facingFromOptions(this.opts),
-          displayWidth: dispW,
-          displayHeight: dispH,
-        });
-        if (result) {
-          const ctx = this.shell.canvas.getContext('2d');
-          if (ctx && this.opts.drawSkeleton !== false) {
-            const mapped = mapVideoKeypointsToDisplay(
-              result.videoKeypoints,
-              result.letterbox,
-              dispW,
-              dispH,
-            );
-            paintSkeleton(ctx, mapped, dispW, dispH, true, this.skeletonDef);
-          } else if (ctx && this.opts.drawSkeleton === false) {
-            ctx.clearRect(0, 0, dispW, dispH);
-          }
-          const pose: Pose = {
-            keypoints: result.keypoints,
-            score: result.score,
-            timestampMs: Date.now(),
-          };
-          this.ingestPose(pose);
-          this.inferMs.push(result.inferenceMs);
-          if (this.inferMs.length > 30) this.inferMs.shift();
-          this.fpsWindow += 1;
-          const now = performance.now();
-          if (now - this.fpsTimer >= 1000) {
-            const fps = this.fpsWindow;
-            this.fpsWindow = 0;
-            this.fpsTimer = now;
-            const med = median(this.inferMs);
-            this.acceleration.medianInferenceMs = med;
-            const above = result.keypoints.filter((k) => k.score >= 0.3).length;
-            const backend =
-              'getBackend' in this.adapter &&
-              typeof (this.adapter as { getBackend?: () => string | null }).getBackend ===
-                'function'
-                ? (this.adapter as { getBackend: () => string | null }).getBackend()
-                : null;
-            this.acceleration.backend = backend;
-            if (this.opts.debugHud) {
-              this.shell.setHud(
-                `${this.resolved.modelId} · ${backend ?? '?'} · ${fps} fps · ${
-                  med != null ? Math.round(med) + ' ms' : '?'
-                } · kp≥0.3=${above}/17`,
-                true,
-              );
-            }
-            this.emit({
-              type: 'stats',
-              fps,
-              medianInferenceMs: med,
-              backend,
-              keypointsAbove03: above,
-              meanScore: result.score,
-              videoSize: `${video.videoWidth}x${video.videoHeight}`,
-              timestampMs: Date.now(),
-            });
-          }
+        await this.runOneFrame();
+        if (this.poseSource.type === 'image') {
+          this.imageShotPending = false;
+          this.running = false;
+          this.busy = false;
+          return;
         }
-        this.revealCamera();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.emit({ type: 'error', code: 'internal', message: `inference: ${message}` });
       }
       this.busy = false;
+    }
+
+    if (token !== this.loopToken || !this.running) return;
+
+    const videoEl =
+      input && isVideoElement(input)
+        ? input
+        : this.shell.video;
+    if (
+      this.poseSource.type !== 'image' &&
+      typeof videoEl.requestVideoFrameCallback === 'function' &&
+      (this.poseSource.type === 'video' || this.poseSource.type === 'camera')
+    ) {
+      videoEl.requestVideoFrameCallback(() => {
+        void this.loop(token);
+      });
+      return;
     }
     requestAnimationFrame(() => {
       void this.loop(token);
@@ -1094,14 +1399,19 @@ export class PoseTrackerClient {
 
   private revealCamera(): void {
     if (!this.shell || this.cameraRevealed) return;
-    const v = this.shell.video;
-    if (!(v.videoWidth > 0 && v.videoHeight > 0)) return;
+    const input = this.estimateInput;
+    if (!input) return;
+    const size = mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap);
+    if (!(size.width > 0 && size.height > 0)) return;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (this.cameraRevealed || !this.shell) return;
-        if (!(this.shell.video.videoWidth > 0)) return;
         this.cameraRevealed = true;
-        this.shell.setCameraVisible(true);
+        if (this.poseSource.type === 'image') {
+          this.shell.setMediaMode('image');
+        } else {
+          this.shell.setMediaMode('video');
+        }
         this.applyWatermark();
       });
     });

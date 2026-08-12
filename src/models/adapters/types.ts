@@ -1,4 +1,5 @@
 import type { Keypoint } from '../../types/pose';
+import type { PoseEstimateInput } from '../../types/source';
 import type { ResolvedPoseModel } from '../poseModels';
 
 export interface Letterbox {
@@ -23,15 +24,18 @@ export interface DetectorFrameResult {
 
 export type Float32ArrayLike = ArrayLike<number>;
 
+export type { PoseEstimateInput };
+
 export interface PoseDetectorAdapter {
   readonly modelId: string;
   load(): Promise<void>;
   /**
-   * Run one frame. `video` must have non-zero dimensions.
+   * Run one frame. Input must have non-zero dimensions
+   * (HTMLVideoElement, HTMLImageElement, canvas, or ImageBitmap).
    * Returns null when the frame should be skipped.
    */
   estimate(
-    video: HTMLVideoElement,
+    input: PoseEstimateInput,
     options: { facingMode: 'user' | 'environment'; displayWidth: number; displayHeight: number },
   ): Promise<DetectorFrameResult | null>;
   dispose(): void;

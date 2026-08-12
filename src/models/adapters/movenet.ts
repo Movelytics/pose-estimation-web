@@ -5,7 +5,21 @@ import type {
   DetectorFrameResult,
   Letterbox,
   PoseDetectorAdapter,
+  PoseEstimateInput,
 } from './types';
+
+function inputSize(input: PoseEstimateInput): { vw: number; vh: number } {
+  if (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) {
+    return { vw: input.videoWidth || 0, vh: input.videoHeight || 0 };
+  }
+  if (typeof HTMLImageElement !== 'undefined' && input instanceof HTMLImageElement) {
+    return { vw: input.naturalWidth || input.width || 0, vh: input.naturalHeight || input.height || 0 };
+  }
+  if (typeof HTMLCanvasElement !== 'undefined' && input instanceof HTMLCanvasElement) {
+    return { vw: input.width || 0, vh: input.height || 0 };
+  }
+  return { vw: (input as ImageBitmap).width || 0, vh: (input as ImageBitmap).height || 0 };
+}
 
 const INPUT_SIZE = 192;
 const SMOOTH_ALPHA = 0.5;
@@ -87,9 +101,10 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     return this.offCtx;
   }
 
-  private prepareInput(video: HTMLVideoElement): HTMLCanvasElement {
-    const vw = video.videoWidth || 1;
-    const vh = video.videoHeight || 1;
+  private prepareInput(input: PoseEstimateInput): HTMLCanvasElement {
+    const { vw: rawW, vh: rawH } = inputSize(input);
+    const vw = rawW || 1;
+    const vh = rawH || 1;
     const scale = Math.min(INPUT_SIZE / vw, INPUT_SIZE / vh);
     const drawW = vw * scale;
     const drawH = vh * scale;
@@ -100,7 +115,7 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     const c2d = this.poseCanvasCtx();
     c2d.fillStyle = '#000';
     c2d.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-    c2d.drawImage(video, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
+    c2d.drawImage(input as CanvasImageSource, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
     return this.offscreen!;
   }
 
@@ -121,7 +136,7 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
   }
 
   async estimate(
-    video: HTMLVideoElement,
+    input: PoseEstimateInput,
     options: {
       facingMode: 'user' | 'environment';
       displayWidth: number;
@@ -129,15 +144,18 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     },
   ): Promise<DetectorFrameResult | null> {
     if (!this.tf || !this.model) throw new Error('MoveNet adapter not loaded');
-    if (!(video.videoWidth > 0 && video.videoHeight > 0)) return null;
+    const size = inputSize(input);
+    if (!(size.vw > 0 && size.vh > 0)) return null;
 
     const t0 = performance.now();
-    const canvas = this.prepareInput(video);
-    const input = this.tf.tidy(() => this.tf!.expandDims(this.tf!.browser.fromPixels(canvas), 0));
-    const out = this.model.execute(input);
+    const canvas = this.prepareInput(input);
+    const tensorIn = this.tf.tidy(() =>
+      this.tf!.expandDims(this.tf!.browser.fromPixels(canvas), 0),
+    );
+    const out = this.model.execute(tensorIn);
     const tensor = Array.isArray(out) ? out[0] : out;
     const data = tensor.dataSync() as Float32Array;
-    input.dispose();
+    tensorIn.dispose();
     if (Array.isArray(out)) out.forEach((t) => t.dispose());
     else out.dispose();
     const inferenceMs = performance.now() - t0;

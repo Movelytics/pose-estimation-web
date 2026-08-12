@@ -55,6 +55,18 @@ export type { BlazePoseModelType } from './models/adapters/blazepose';
 export { openCameraStream, stopMediaStream } from './camera/getUserMedia';
 export type { CameraOptions } from './camera/getUserMedia';
 
+export { normalizePoseSource } from './types/source';
+export type {
+  CameraFacingMode,
+  CameraPoseSource,
+  ImagePoseSource,
+  PoseEstimateInput,
+  PoseSource,
+  PoseSourceProps,
+  PoseSourceType,
+  VideoPoseSource,
+} from './types/source';
+
 export { DEFAULT_LOADING_TEXT, POSETRACKER_LOGO_URL, BRAND_COLORS } from './brand';
 export { DEFAULT_SKELETON, drawSkeleton } from './overlay/skeleton';
 export { mountDomShell } from './overlay/domShell';

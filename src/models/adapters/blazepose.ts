@@ -1,7 +1,25 @@
 import { COCO_KEYPOINT_NAMES, type CocoKeypointName } from '../../types/pose';
 import { initWebGlBackend, resolveTf } from '../../tf/loadTf';
 import { resolvePoseDetection } from '../../tf/loadPoseDetection';
-import type { CreateAdapterContext, DetectorFrameResult, PoseDetectorAdapter } from './types';
+import type {
+  CreateAdapterContext,
+  DetectorFrameResult,
+  PoseDetectorAdapter,
+  PoseEstimateInput,
+} from './types';
+
+function blazeInputSize(input: PoseEstimateInput): { vw: number; vh: number } {
+  if (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) {
+    return { vw: input.videoWidth || 0, vh: input.videoHeight || 0 };
+  }
+  if (typeof HTMLImageElement !== 'undefined' && input instanceof HTMLImageElement) {
+    return { vw: input.naturalWidth || input.width || 0, vh: input.naturalHeight || input.height || 0 };
+  }
+  if (typeof HTMLCanvasElement !== 'undefined' && input instanceof HTMLCanvasElement) {
+    return { vw: input.width || 0, vh: input.height || 0 };
+  }
+  return { vw: (input as ImageBitmap).width || 0, vh: (input as ImageBitmap).height || 0 };
+}
 
 /**
  * BlazePose via optional `@tensorflow-models/pose-detection`.
@@ -72,7 +90,7 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
   }
 
   async estimate(
-    video: HTMLVideoElement,
+    input: PoseEstimateInput,
     options: {
       facingMode: 'user' | 'environment';
       displayWidth: number;
@@ -80,10 +98,11 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
     },
   ): Promise<DetectorFrameResult | null> {
     if (!this.detector) throw new Error('BlazePose adapter not loaded');
-    if (!(video.videoWidth > 0 && video.videoHeight > 0)) return null;
+    const size = blazeInputSize(input);
+    if (!(size.vw > 0 && size.vh > 0)) return null;
 
     const t0 = performance.now();
-    const poses = await this.detector.estimatePoses(video, {
+    const poses = await this.detector.estimatePoses(input as HTMLVideoElement, {
       flipHorizontal: false,
       maxPoses: 1,
     });
@@ -103,16 +122,16 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
         letterbox: {
           offsetX: 0,
           offsetY: 0,
-          drawW: video.videoWidth,
-          drawH: video.videoHeight,
-          vw: video.videoWidth,
-          vh: video.videoHeight,
+          drawW: size.vw,
+          drawH: size.vh,
+          vw: size.vw,
+          vh: size.vh,
         },
       };
     }
 
-    const vw = video.videoWidth || 1;
-    const vh = video.videoHeight || 1;
+    const vw = size.vw || 1;
+    const vh = size.vh || 1;
     const dispW = options.displayWidth || 1;
     const dispH = options.displayHeight || 1;
     const byName = new Map<string, { x: number; y: number; score: number }>();

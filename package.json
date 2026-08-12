@@ -1,6 +1,6 @@
 {
   "name": "@pose-tracker/pose-estimation-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "PoseTracker web pose estimation SDK (vanilla) — MoveNet via TensorFlow.js + remote model URL. Exercise engine via API token. No bundled weights.",
   "type": "module",
   "main": "./dist/index.cjs",
