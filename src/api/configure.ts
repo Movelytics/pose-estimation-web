@@ -5,6 +5,7 @@
 
 import { SDK_NAME, SDK_VERSION } from '../version';
 import type { ConfigureRequest, PoseModelProfile, SdkManifest } from '../types/manifest';
+import type { EngineChannel } from '../engineChannel';
 
 export { SDK_VERSION };
 export { SDK_NAME };
@@ -17,6 +18,11 @@ export interface ConfigureOptions {
   poseModelProfile?: PoseModelProfile;
   locale?: string;
   localVersions?: ConfigureRequest['localVersions'];
+  /**
+   * Opt-in V4 heuristic engine. Default `'v3'` (production FSM).
+   * Set `'v4'` at init — the handshake downloads `engine-v4.bundle.js`.
+   */
+  engine?: EngineChannel;
 }
 
 export class ConfigureError extends Error {
@@ -42,6 +48,7 @@ export async function configure(
     poseModelProfile: options.poseModelProfile ?? 'AdaptiveChoice',
     locale: options.locale,
     localVersions: options.localVersions,
+    engineChannel: options.engine === 'v4' ? 'v4' : 'v3',
   };
 
   let response: Response;

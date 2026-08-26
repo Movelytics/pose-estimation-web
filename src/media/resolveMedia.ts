@@ -83,6 +83,10 @@ export function waitForImageReady(img: HTMLImageElement, timeoutMs = 15000): Pro
       resolve();
       return;
     }
+    if (img.complete) {
+      reject(new Error('Image failed to decode (naturalWidth=0)'));
+      return;
+    }
     const onReady = (): void => {
       cleanup();
       resolve();

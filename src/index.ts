@@ -19,6 +19,8 @@ export type {
   PoseTrackerClientOptions,
   StartExerciseOptions,
 } from './createPoseTracker';
+export type { EngineChannel } from './engineChannel';
+export { V4_ONLY_EXERCISE_IDS, normalizeEngineChannel, requiresEngineV4 } from './engineChannel';
 
 export {
   DEFAULT_MOVENET_LIGHTNING_URL,

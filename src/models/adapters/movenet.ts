@@ -22,14 +22,16 @@ function inputSize(input: PoseEstimateInput): { vw: number; vh: number } {
 }
 
 const INPUT_SIZE = 192;
-const SMOOTH_ALPHA = 0.5;
+const SMOOTH_ALPHA = 0.45;
+/** Person bbox as a fraction of the 192 window — typical webcam upper-body framing. */
+const STILL_TARGET_FILL = 0.52;
 
 function modelNormToVideo(xNorm: number, yNorm: number, lb: Letterbox): { x: number; y: number } {
   const xSq = xNorm * INPUT_SIZE;
   const ySq = yNorm * INPUT_SIZE;
   return {
-    x: (xSq - lb.offsetX) * (lb.vw / lb.drawW),
-    y: (ySq - lb.offsetY) * (lb.vh / lb.drawH),
+    x: (xSq - lb.offsetX) * (lb.vw / lb.drawW) + (lb.originX ?? 0),
+    y: (ySq - lb.offsetY) * (lb.vh / lb.drawH) + (lb.originY ?? 0),
   };
 }
 
@@ -55,6 +57,18 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
   private offscreen: HTMLCanvasElement | null = null;
   private offCtx: CanvasRenderingContext2D | null = null;
   private smoothed: Array<{ xPx: number; yPx: number; score: number }> | null = null;
+  private lastVideoKps: Array<{ xPx: number; yPx: number; score: number }> | null = null;
+  private stillPass = 0;
+  private inferLb: Letterbox = {
+    offsetX: 0,
+    offsetY: 0,
+    drawW: INPUT_SIZE,
+    drawH: INPUT_SIZE,
+    vw: 1,
+    vh: 1,
+    originX: 0,
+    originY: 0,
+  };
   private letterbox: Letterbox = {
     offsetX: 0,
     offsetY: 0,
@@ -101,21 +115,85 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     return this.offCtx;
   }
 
-  private prepareInput(input: PoseEstimateInput): HTMLCanvasElement {
+  private prepareInput(input: PoseEstimateInput, trackRoi: boolean): HTMLCanvasElement {
     const { vw: rawW, vh: rawH } = inputSize(input);
     const vw = rawW || 1;
     const vh = rawH || 1;
-    const scale = Math.min(INPUT_SIZE / vw, INPUT_SIZE / vh);
-    const drawW = vw * scale;
-    const drawH = vh * scale;
+
+    let winX = 0;
+    let winY = 0;
+    let winW = vw;
+    let winH = vh;
+
+    if (trackRoi && this.lastVideoKps && this.stillPass > 0) {
+      const pts = this.lastVideoKps.filter((k) => k.score >= 0.15);
+      if (pts.length >= 4) {
+        let minx = Infinity;
+        let miny = Infinity;
+        let maxx = -Infinity;
+        let maxy = -Infinity;
+        for (const p of pts) {
+          minx = Math.min(minx, p.xPx);
+          miny = Math.min(miny, p.yPx);
+          maxx = Math.max(maxx, p.xPx);
+          maxy = Math.max(maxy, p.yPx);
+        }
+        const bw = Math.max(8, maxx - minx);
+        const bh = Math.max(8, maxy - miny);
+        const cx = (minx + maxx) / 2;
+        const cy = (miny + maxy) / 2;
+        winW = Math.max(bw / STILL_TARGET_FILL, vw * 0.35);
+        winH = Math.max(bh / STILL_TARGET_FILL, vh * 0.35);
+        const imgAspect = vw / vh;
+        if (winW / winH < imgAspect) winW = winH * imgAspect;
+        else winH = winW / imgAspect;
+        winX = cx - winW / 2;
+        winY = cy - winH / 2;
+      }
+    }
+
+    const scale = Math.min(INPUT_SIZE / winW, INPUT_SIZE / winH);
+    const drawW = winW * scale;
+    const drawH = winH * scale;
     const offsetX = (INPUT_SIZE - drawW) / 2;
     const offsetY = (INPUT_SIZE - drawH) / 2;
-    this.letterbox = { offsetX, offsetY, drawW, drawH, vw, vh };
+    this.inferLb = {
+      offsetX,
+      offsetY,
+      drawW,
+      drawH,
+      vw: winW,
+      vh: winH,
+      originX: winX,
+      originY: winY,
+    };
+    this.letterbox = { offsetX: 0, offsetY: 0, drawW: vw, drawH: vh, vw, vh };
 
     const c2d = this.poseCanvasCtx();
     c2d.fillStyle = '#000';
     c2d.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
-    c2d.drawImage(input as CanvasImageSource, 0, 0, vw, vh, offsetX, offsetY, drawW, drawH);
+    const srcX = Math.max(0, winX);
+    const srcY = Math.max(0, winY);
+    const srcR = Math.min(vw, winX + winW);
+    const srcB = Math.min(vh, winY + winH);
+    if (srcR > srcX && srcB > srcY) {
+      const dx = offsetX + (srcX - winX) * (drawW / winW);
+      const dy = offsetY + (srcY - winY) * (drawH / winH);
+      const dw = (srcR - srcX) * (drawW / winW);
+      const dh = (srcB - srcY) * (drawH / winH);
+      c2d.drawImage(
+        input as CanvasImageSource,
+        srcX,
+        srcY,
+        srcR - srcX,
+        srcB - srcY,
+        dx,
+        dy,
+        dw,
+        dh,
+      );
+    }
+    this.stillPass += 1;
     return this.offscreen!;
   }
 
@@ -141,6 +219,7 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
       facingMode: 'user' | 'environment';
       displayWidth: number;
       displayHeight: number;
+      temporalSmooth?: boolean;
     },
   ): Promise<DetectorFrameResult | null> {
     if (!this.tf || !this.model) throw new Error('MoveNet adapter not loaded');
@@ -148,7 +227,10 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     if (!(size.vw > 0 && size.vh > 0)) return null;
 
     const t0 = performance.now();
-    const canvas = this.prepareInput(input);
+    const isStill =
+      typeof HTMLImageElement !== 'undefined' && input instanceof HTMLImageElement;
+    const trackRoi = options.temporalSmooth !== false && isStill;
+    const canvas = this.prepareInput(input, trackRoi);
     const tensorIn = this.tf.tidy(() =>
       this.tf!.expandDims(this.tf!.browser.fromPixels(canvas), 0),
     );
@@ -160,7 +242,8 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     else out.dispose();
     const inferenceMs = performance.now() - t0;
 
-    const lb = this.letterbox;
+    const lb = this.inferLb;
+    const coverLb = this.letterbox;
     const dispW = options.displayWidth || 1;
     const dispH = options.displayHeight || 1;
     const drawRaw: Array<{ name: string; xPx: number; yPx: number; score: number }> = [];
@@ -180,7 +263,9 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
       scoreSum += score;
     }
 
-    const sm = this.smooth(drawRaw);
+    const sm =
+      options.temporalSmooth === false ? drawRaw : this.smooth(drawRaw);
+    this.lastVideoKps = sm.map((k) => ({ xPx: k.xPx, yPx: k.yPx, score: k.score }));
     const videoKeypoints = sm.map((k, i) => ({
       name: COCO_KEYPOINT_NAMES[i],
       xPx: k.xPx,
@@ -189,7 +274,7 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     }));
 
     const keypoints = videoKeypoints.map((k) => {
-      const d = videoToCover(k.xPx, k.yPx, dispW, dispH, lb);
+      const d = videoToCover(k.xPx, k.yPx, dispW, dispH, coverLb);
       let nx = dispW > 0 ? d.x / dispW : 0;
       const ny = dispH > 0 ? d.y / dispH : 0;
       if (options.facingMode === 'user') nx = 1 - nx;
@@ -207,8 +292,15 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
       score: scoreSum / 17,
       inferenceMs,
       videoKeypoints,
-      letterbox: lb,
+      letterbox: coverLb,
     };
+  }
+
+  /** Clear EMA state (call when the still / clip changes). */
+  resetTemporal(): void {
+    this.smoothed = null;
+    this.lastVideoKps = null;
+    this.stillPass = 0;
   }
 
   dispose(): void {
@@ -219,6 +311,8 @@ export class MoveNetGraphAdapter implements PoseDetectorAdapter {
     }
     this.model = null;
     this.smoothed = null;
+    this.lastVideoKps = null;
+    this.stillPass = 0;
     this.offscreen = null;
     this.offCtx = null;
   }

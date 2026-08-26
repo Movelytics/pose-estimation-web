@@ -32,6 +32,7 @@ import {
 } from './engine/EngineLoader';
 import type { CustomExerciseDescriptor, EngineSession, PoseTrackerEngine } from './engine/types';
 import { findExerciseByIdOrAlias } from './exercises/aliases';
+import { normalizeEngineChannel, requiresEngineV4, type EngineChannel } from './engineChannel';
 import {
   toClassicNativeMessage,
   type ClassicMessageListener,
@@ -113,6 +114,12 @@ export interface PoseTrackerClientOptions extends ConfigureOptions {
   /** Convenience with `source: 'video' | 'image'` (string / File / Blob). */
   sourceUrl?: string;
   sourceFile?: File | Blob;
+  /**
+   * Still-image inference. Default `single`: one full-frame SinglePose pass
+   * (no EMA / no ROI). `tracked`: treat analyze() as video frames — EMA +
+   * previous-pose crop so each shot can refine the last skeleton.
+   */
+  stillMode?: 'single' | 'tracked';
 }
 
 /** @deprecated Prefer PoseTrackerClientOptions — kept for vanilla DX. */
@@ -414,7 +421,11 @@ export class PoseTrackerClient {
     if (this.poseSource.type === 'camera' && this.poseSource.facingMode) {
       this.opts.facingMode = this.poseSource.facingMode;
     }
+    if (this.adapter?.resetTemporal) {
+      this.adapter.resetTemporal();
+    }
     if (!this.shell) return;
+    await this.ensureAdapter();
     await this.ensureSource();
     if (wasRunning || this.poseSource.type === 'image') {
       if (this.poseSource.type === 'image') this.imageShotPending = true;
@@ -536,7 +547,32 @@ export class PoseTrackerClient {
   }
 
   getAvailableExercises(): ExerciseConfig[] {
-    return this.mode === 'full-engine' ? this.manifest?.exercises ?? [] : [];
+    if (this.mode !== 'full-engine') return [];
+    if (normalizeEngineChannel(this.opts.engine) === 'v4') {
+      const listed = this.engine?.listExercises?.() ?? [];
+      if (listed.length) return listed.map((e) => this.v4ExerciseConfig(e));
+    }
+    return this.manifest?.exercises ?? [];
+  }
+
+  getEngineChannel(): EngineChannel {
+    return normalizeEngineChannel(this.opts.engine);
+  }
+
+  private v4ExerciseConfig(entry: { id: string; displayName?: string; type?: string }): ExerciseConfig {
+    const type = entry.type === 'static' ? 'static' : 'dynamic';
+    return {
+      id: entry.id,
+      name: entry.displayName || entry.id,
+      type,
+      movement: {
+        name: entry.id,
+        type,
+        scale_acceptance: {},
+        movement_steps: [],
+        movement_initial_posture: null,
+      },
+    };
   }
 
   getAvailableCustomExercises(): CustomExerciseDescriptor[] {
@@ -574,6 +610,30 @@ export class PoseTrackerClient {
         throw new Error(FREE_PLAN_FEATURES_MESSAGE);
       }
     }
+    if (requiresEngineV4(exerciseId) && normalizeEngineChannel(this.opts.engine) !== 'v4') {
+      const message = `Exercise '${exerciseId}' requires engine: 'v4'`;
+      this.reportError({ type: 'error', code: 'invalid_exercise', message });
+      throw new Error(message);
+    }
+    if (normalizeEngineChannel(this.opts.engine) === 'v4') {
+      const listed = this.engine.listExercises?.() ?? [];
+      const v4Hit = listed.find((e) => e.id === exerciseId);
+      if (v4Hit) {
+        this.beginEngineSession(this.v4ExerciseConfig(v4Hit), options);
+        return;
+      }
+      const customs = this.getAvailableCustomExercises();
+      const custom =
+        customs.find((e) => e.id === exerciseId) ??
+        findExerciseByIdOrAlias(exerciseId, customs);
+      if (custom) {
+        this.startCustomExercise(custom, options);
+        return;
+      }
+      const message = `Exercise '${exerciseId}' is not available in V4 engine`;
+      this.reportError({ type: 'error', code: 'invalid_exercise', message });
+      throw new Error(message);
+    }
     const available = this.getAvailableExercises();
     const exercise = findExerciseByIdOrAlias(exerciseId, available);
     if (!exercise) {
@@ -589,8 +649,13 @@ export class PoseTrackerClient {
       this.reportError({ type: 'error', code: 'invalid_exercise', message });
       throw new Error(message);
     }
+    this.beginEngineSession(exercise, options);
+  }
+
+  private beginEngineSession(exercise: ExerciseConfig, options: StartExerciseOptions): void {
+    if (!this.engine) return;
     this.stopExercise();
-    this.currentExerciseId = exerciseId;
+    this.currentExerciseId = exercise.id;
     this.keypointsSuppressionLogged = false;
     this.session = this.engine.createSession(
       {
@@ -998,14 +1063,27 @@ export class PoseTrackerClient {
     if (!this.adapter || !this.shell || !this.estimateInput) return null;
     if (!this.frameReady(this.estimateInput)) return null;
     const input = this.estimateInput;
-    const dispW = this.shell.canvas.clientWidth || this.shell.root.clientWidth || 1;
-    const dispH = this.shell.canvas.clientHeight || this.shell.root.clientHeight || 1;
+    const clientW = this.shell.canvas.clientWidth || this.shell.root.clientWidth || 1;
+    const clientH = this.shell.canvas.clientHeight || this.shell.root.clientHeight || 1;
+    const media = mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap);
+    // Still images: normalize keypoints to the image itself (stable research coords),
+    // independent of a tiny / letterboxed mount. Camera/video keep cover→client mapping.
+    const useMediaSpace =
+      this.poseSource.type === 'image' && media.width > 0 && media.height > 0;
+    const dispW = useMediaSpace ? media.width : clientW;
+    const dispH = useMediaSpace ? media.height : clientH;
     const facing =
       this.poseSource.type === 'camera' ? facingFromOptions(this.opts) : 'environment';
+    const stillTracked =
+      this.poseSource.type === 'image' && this.opts.stillMode === 'tracked';
     const result = await this.adapter.estimate(input, {
       facingMode: facing,
       displayWidth: dispW,
       displayHeight: dispH,
+      temporalSmooth:
+        this.poseSource.type === 'camera' ||
+        this.poseSource.type === 'video' ||
+        stillTracked,
     });
     if (!result) return null;
     const ctx = this.shell.canvas.getContext('2d');
@@ -1013,12 +1091,12 @@ export class PoseTrackerClient {
       const mapped = mapVideoKeypointsToDisplay(
         result.videoKeypoints,
         result.letterbox,
-        dispW,
-        dispH,
+        clientW,
+        clientH,
       );
-      paintSkeleton(ctx, mapped, dispW, dispH, true, this.skeletonDef);
+      paintSkeleton(ctx, mapped, clientW, clientH, true, this.skeletonDef);
     } else if (ctx && this.opts.drawSkeleton === false) {
-      ctx.clearRect(0, 0, dispW, dispH);
+      ctx.clearRect(0, 0, clientW, clientH);
     }
     const pose: Pose = {
       keypoints: result.keypoints,
@@ -1068,7 +1146,13 @@ export class PoseTrackerClient {
   }
 
   private async loop(token: number): Promise<void> {
-    if (token !== this.loopToken || !this.running || !this.adapter || !this.shell || this.disposed) {
+    if (token !== this.loopToken || !this.running || !this.shell || this.disposed) {
+      return;
+    }
+    if (!this.adapter) {
+      requestAnimationFrame(() => {
+        void this.loop(token);
+      });
       return;
     }
     const input = this.estimateInput;
@@ -1081,8 +1165,8 @@ export class PoseTrackerClient {
     if (shouldInfer) {
       this.busy = true;
       try {
-        await this.runOneFrame();
-        if (this.poseSource.type === 'image') {
+        const pose = await this.runOneFrame();
+        if (this.poseSource.type === 'image' && pose) {
           this.imageShotPending = false;
           this.running = false;
           this.busy = false;
@@ -1091,6 +1175,12 @@ export class PoseTrackerClient {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.emit({ type: 'error', code: 'internal', message: `inference: ${message}` });
+        if (this.poseSource.type === 'image') {
+          this.imageShotPending = false;
+          this.running = false;
+          this.busy = false;
+          return;
+        }
       }
       this.busy = false;
     }

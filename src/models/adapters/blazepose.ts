@@ -29,8 +29,8 @@ function blazeInputSize(input: PoseEstimateInput): { vw: number; vh: number } {
  * 2. npm peer import (bundlers)
  * 3. Dynamic jsDelivr inject in the browser
  *
- * Maps MediaPipe landmarks to COCO-17 when possible; BlazePose’s extra face /
- * hand / foot joints are dropped so `keypoints` events stay MoveNet-shaped.
+ * Maps MediaPipe landmarks to COCO-17. Extra face landmarks
+ * (`left_eye_inner` / `outer`, mouth) are appended for profile eye/nose fusion.
  *
  * Default modelType: `lite` (realtime-friendly). Override via resolved options
  * when wired through the client.
@@ -55,6 +55,37 @@ const BLAZE_TO_COCO: Record<string, CocoKeypointName | undefined> = {
   left_ankle: 'left_ankle',
   right_ankle: 'right_ankle',
 };
+
+const FACE_EXTRA_NAMES = new Set([
+  'left_eye_inner',
+  'left_eye_outer',
+  'right_eye_inner',
+  'right_eye_outer',
+  'mouth_left',
+  'mouth_right',
+]);
+
+/** Cap detector input so GPU downscale cannot desync imageSize vs tensor. */
+const BLAZE_MAX_SIDE = 1280;
+
+function toSourcePixels(
+  x: number,
+  y: number,
+  scratchW: number,
+  scratchH: number,
+  srcW: number,
+  srcH: number,
+  maxCoord: number,
+): { x: number; y: number } {
+  // TFJS BlazePose usually returns pixels of the tensor image. Some paths
+  // leave landmarks in [0,1]; treat that as normalized to the scratch canvas.
+  if (maxCoord <= 1.5 && scratchW > 2) {
+    return { x: x * srcW, y: y * srcH };
+  }
+  const sx = scratchW / srcW;
+  const sy = scratchH / srcH;
+  return { x: sx > 0 ? x / sx : x, y: sy > 0 ? y / sy : y };
+}
 
 export type BlazePoseModelType = 'lite' | 'full' | 'heavy';
 
@@ -84,7 +115,7 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
       {
         runtime: 'tfjs',
         modelType: this.modelType,
-        enableSmoothing: true,
+        enableSmoothing: false,
       },
     );
   }
@@ -95,14 +126,43 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
       facingMode: 'user' | 'environment';
       displayWidth: number;
       displayHeight: number;
+      temporalSmooth?: boolean;
     },
   ): Promise<DetectorFrameResult | null> {
     if (!this.detector) throw new Error('BlazePose adapter not loaded');
     const size = blazeInputSize(input);
     if (!(size.vw > 0 && size.vh > 0)) return null;
 
+    // Independent stills: drop cached ROI so a previous photo cannot warp this one.
+    if (options.temporalSmooth === false) this.resetTemporal();
+
+    // Feed a canvas at natural aspect so CSS-shrunk <img>/<video> mounts do not
+    // starve the detector. Cap the long side so TF.js texture downscale cannot
+    // desync getImageSize() vs the actual tensor.
+    let estimateTarget: PoseEstimateInput = input;
+    let scratch: HTMLCanvasElement | null = null;
+    let scratchW = size.vw;
+    let scratchH = size.vh;
+    if (
+      (typeof HTMLImageElement !== 'undefined' && input instanceof HTMLImageElement) ||
+      (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) ||
+      (typeof HTMLCanvasElement !== 'undefined' && input instanceof HTMLCanvasElement)
+    ) {
+      const fit = Math.min(1, BLAZE_MAX_SIDE / Math.max(size.vw, size.vh));
+      scratchW = Math.max(1, Math.round(size.vw * fit));
+      scratchH = Math.max(1, Math.round(size.vh * fit));
+      scratch = document.createElement('canvas');
+      scratch.width = scratchW;
+      scratch.height = scratchH;
+      const ctx = scratch.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(input as CanvasImageSource, 0, 0, scratchW, scratchH);
+        estimateTarget = scratch;
+      }
+    }
+
     const t0 = performance.now();
-    const poses = await this.detector.estimatePoses(input as HTMLVideoElement, {
+    const poses = await this.detector.estimatePoses(estimateTarget as HTMLVideoElement, {
       flipHorizontal: false,
       maxPoses: 1,
     });
@@ -134,16 +194,22 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
     const vh = size.vh || 1;
     const dispW = options.displayWidth || 1;
     const dispH = options.displayHeight || 1;
+    let maxCoord = 0;
+    for (const kp of pose.keypoints) {
+      maxCoord = Math.max(maxCoord, Math.abs(kp.x || 0), Math.abs(kp.y || 0));
+    }
     const byName = new Map<string, { x: number; y: number; score: number }>();
+    const extrasRaw: Array<{ name: string; x: number; y: number; score: number }> = [];
     for (const kp of pose.keypoints) {
       const name = String(kp.name || '').toLowerCase();
+      const score = typeof kp.score === 'number' ? kp.score : 0;
+      const src = toSourcePixels(kp.x, kp.y, scratchW, scratchH, vw, vh, maxCoord);
       const coco = BLAZE_TO_COCO[name];
-      if (!coco) continue;
-      byName.set(coco, {
-        x: kp.x,
-        y: kp.y,
-        score: typeof kp.score === 'number' ? kp.score : 0,
-      });
+      if (coco) {
+        byName.set(coco, { x: src.x, y: src.y, score });
+      } else if (FACE_EXTRA_NAMES.has(name)) {
+        extrasRaw.push({ name, x: src.x, y: src.y, score });
+      }
     }
 
     const videoKeypoints = COCO_KEYPOINT_NAMES.map((name) => {
@@ -177,6 +243,20 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
       };
     });
 
+    for (const extra of extrasRaw) {
+      const dx = extra.x * scale + ox;
+      const dy = extra.y * scale + oy;
+      let nx = dispW > 0 ? dx / dispW : 0;
+      const ny = dispH > 0 ? dy / dispH : 0;
+      if (options.facingMode === 'user') nx = 1 - nx;
+      keypoints.push({
+        name: extra.name as CocoKeypointName,
+        x: Math.min(1, Math.max(0, nx)),
+        y: Math.min(1, Math.max(0, ny)),
+        score: extra.score,
+      });
+    }
+
     return {
       keypoints,
       score: scoreSum / 17,
@@ -191,6 +271,15 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
         vh,
       },
     };
+  }
+
+  /** Clear cached ROI / landmark filters (call when the still changes). */
+  resetTemporal(): void {
+    try {
+      this.detector?.reset?.();
+    } catch {
+      /* ignore */
+    }
   }
 
   dispose(): void {

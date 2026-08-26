@@ -9,6 +9,9 @@ export interface Letterbox {
   drawH: number;
   vw: number;
   vh: number;
+  /** Window top-left in original media pixels (still-image video simulation). */
+  originX?: number;
+  originY?: number;
 }
 
 export interface DetectorFrameResult {
@@ -36,8 +39,16 @@ export interface PoseDetectorAdapter {
    */
   estimate(
     input: PoseEstimateInput,
-    options: { facingMode: 'user' | 'environment'; displayWidth: number; displayHeight: number },
+    options: {
+      facingMode: 'user' | 'environment';
+      displayWidth: number;
+      displayHeight: number;
+      /** EMA across frames. Default true. Stills may pass true to simulate a short clip. */
+      temporalSmooth?: boolean;
+    },
   ): Promise<DetectorFrameResult | null>;
+  /** Optional: clear temporal filters when the media source changes. */
+  resetTemporal?(): void;
   dispose(): void;
 }
 

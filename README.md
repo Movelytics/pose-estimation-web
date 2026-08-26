@@ -41,6 +41,10 @@ await pt.analyze();     // re-run on the same image
 | `{ type: 'video', src }` | File / blob URL / `<video>` — stream while playing |
 | `{ type: 'image', src }` | File / blob URL / `<img>` / ImageBitmap — one shot (+ `analyze()`) |
 
+Full tables (RN parity, CORS, React): monorepo
+[`docs/MEDIA_SOURCES.md`](../../docs/MEDIA_SOURCES.md) · public
+https://docs.posetracker.com/media-sources
+
 ## Script tag (CDN)
 
 The IIFE build exposes a **`PoseTracker`** global (`PoseTracker.createPoseTracker`, …).
@@ -57,7 +61,7 @@ The IIFE build exposes a **`PoseTracker`** global (`PoseTracker.createPoseTracke
     <!-- 1) TensorFlow.js (peer — required before PoseTracker) -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
     <!-- 2) PoseTracker IIFE (jsDelivr / unpkg both work) -->
-    <script src="https://cdn.jsdelivr.net/npm/@pose-tracker/pose-estimation-web@0.2.0/dist/pose-tracker.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@pose-tracker/pose-estimation-web@0.3.0/dist/pose-tracker.global.js"></script>
   </head>
   <body>
     <div id="root" style="width: 100%; height: 100vh; background: #111"></div>
@@ -79,7 +83,7 @@ The IIFE build exposes a **`PoseTracker`** global (`PoseTracker.createPoseTracke
 Equivalent unpkg URL:
 
 ```text
-https://unpkg.com/@pose-tracker/pose-estimation-web@0.2.0/dist/pose-tracker.global.js
+https://unpkg.com/@pose-tracker/pose-estimation-web@0.3.0/dist/pose-tracker.global.js
 ```
 
 Omitting `/dist/...` also works — `package.json` `jsdelivr` / `unpkg` fields point at the IIFE.
