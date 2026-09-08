@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.1] — 2026-09-08
+
+### Changed
+
+- Handshake default is now **V4**. Unlabeled `startExercise('squat')` stays on the production V3 FSM inside the V4 bundle.
+- `engine: 'v4'` = catalog squat; `engine: 'v3'` = V3 bundle.
+
+### Notes
+
+- 0.3.0 clients still default to V3. 0.2.x omit `engineChannel` and stay on V3.
+
 ## [0.3.0] — 2026-08-26
 
 ### Added

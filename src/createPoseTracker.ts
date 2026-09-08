@@ -31,8 +31,14 @@ import {
   type FileStore,
 } from './engine/EngineLoader';
 import type { CustomExerciseDescriptor, EngineSession, PoseTrackerEngine } from './engine/types';
-import { findExerciseByIdOrAlias } from './exercises/aliases';
-import { normalizeEngineChannel, requiresEngineV4, type EngineChannel } from './engineChannel';
+import { findExerciseByIdOrAlias, resolveExerciseName } from './exercises/aliases';
+import {
+  isProductionSquatId,
+  normalizeEngineChannel,
+  requiresEngineV4,
+  resolveMovementEngine,
+  type EngineChannel,
+} from './engineChannel';
 import {
   toClassicNativeMessage,
   type ClassicMessageListener,
@@ -615,9 +621,15 @@ export class PoseTrackerClient {
       this.reportError({ type: 'error', code: 'invalid_exercise', message });
       throw new Error(message);
     }
-    if (normalizeEngineChannel(this.opts.engine) === 'v4') {
+    // Production squat stays on the V3 FSM unless engine is explicitly 'v4'.
+    const jumpId = resolveExerciseName(exerciseId) || exerciseId;
+    const sessionEngine = resolveMovementEngine({
+      engine: this.opts.engine,
+      exercise: jumpId,
+    });
+    if (sessionEngine === 'v4') {
       const listed = this.engine.listExercises?.() ?? [];
-      const v4Hit = listed.find((e) => e.id === exerciseId);
+      const v4Hit = listed.find((e) => e.id === exerciseId) ?? listed.find((e) => e.id === jumpId);
       if (v4Hit) {
         this.beginEngineSession(this.v4ExerciseConfig(v4Hit), options);
         return;
@@ -633,6 +645,14 @@ export class PoseTrackerClient {
       const message = `Exercise '${exerciseId}' is not available in V4 engine`;
       this.reportError({ type: 'error', code: 'invalid_exercise', message });
       throw new Error(message);
+    }
+    // V4 bundle still runs the production V3 squat FSM unless engine is 'v4'.
+    if (isProductionSquatId(jumpId) && normalizeEngineChannel(this.opts.engine) === 'v4') {
+      this.beginEngineSession(
+        this.v4ExerciseConfig({ id: jumpId || 'squat', displayName: 'Squat', type: 'dynamic' }),
+        options,
+      );
+      return;
     }
     const available = this.getAvailableExercises();
     const exercise = findExerciseByIdOrAlias(exerciseId, available);
@@ -663,6 +683,7 @@ export class PoseTrackerClient {
         locale: this.opts.locale ?? 'en',
         difficulty: options.difficulty,
         minGrade: this.features.minGrade ?? undefined,
+        v4CatalogSquat: this.opts.engine === 'v4',
         features: {
           angles: this.features.angles,
           recommendations: this.features.recommendations,

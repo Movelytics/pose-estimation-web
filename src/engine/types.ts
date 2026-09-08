@@ -39,6 +39,11 @@ export interface EngineSessionOptions {
   minGrade?: MinGrade;
   /** Emission flags — engines older than 1.1.0 ignore them (client re-filters). */
   features?: EngineSessionFeatures;
+  /**
+   * Run the V4 catalog squat instead of the production V3 FSM.
+   * Set when the host passed `engine: 'v4'` explicitly.
+   */
+  v4CatalogSquat?: boolean;
 }
 
 export interface EngineSession {

@@ -20,7 +20,14 @@ export type {
   StartExerciseOptions,
 } from './createPoseTracker';
 export type { EngineChannel } from './engineChannel';
-export { V4_ONLY_EXERCISE_IDS, normalizeEngineChannel, requiresEngineV4 } from './engineChannel';
+export {
+  PRODUCTION_SQUAT_IDS,
+  V4_ONLY_EXERCISE_IDS,
+  isProductionSquatId,
+  normalizeEngineChannel,
+  requiresEngineV4,
+  resolveMovementEngine,
+} from './engineChannel';
 
 export {
   DEFAULT_MOVENET_LIGHTNING_URL,
