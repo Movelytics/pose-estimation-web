@@ -66,7 +66,21 @@ const FACE_EXTRA_NAMES = new Set([
 ]);
 
 /** Cap detector input so GPU downscale cannot desync imageSize vs tensor. */
-const BLAZE_MAX_SIDE = 1280;
+const BLAZE_MAX_SIDE_DESKTOP = 1280;
+/**
+ * Mobile WebGL cannot afford 1280; 640 keeps aspect.
+ * RN / Front iframe letterbox BlazePose to a 256² square; this web adapter
+ * keeps aspect (no contain-pad) because TF.js getImageSize() vs the actual
+ * tensor desynced on a letterboxed canvas. Cap is still well below HD.
+ */
+const BLAZE_MAX_SIDE_MOBILE = 640;
+
+function blazeMaxSide(): number {
+  if (typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+    return BLAZE_MAX_SIDE_MOBILE;
+  }
+  return BLAZE_MAX_SIDE_DESKTOP;
+}
 
 function toSourcePixels(
   x: number,
@@ -148,7 +162,7 @@ export class BlazePoseAdapter implements PoseDetectorAdapter {
       (typeof HTMLVideoElement !== 'undefined' && input instanceof HTMLVideoElement) ||
       (typeof HTMLCanvasElement !== 'undefined' && input instanceof HTMLCanvasElement)
     ) {
-      const fit = Math.min(1, BLAZE_MAX_SIDE / Math.max(size.vw, size.vh));
+      const fit = Math.min(1, blazeMaxSide() / Math.max(size.vw, size.vh));
       scratchW = Math.max(1, Math.round(size.vw * fit));
       scratchH = Math.max(1, Math.round(size.vh * fit));
       scratch = document.createElement('canvas');
