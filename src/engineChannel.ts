@@ -14,6 +14,7 @@ export const V4_ONLY_EXERCISE_IDS = [
   'shoulder_deep_breath',
   'chair_forward_fold',
   'chair_side_stretch',
+  'back_flexibility_test',
 ] as const;
 
 export const PRODUCTION_SQUAT_IDS = ['squat', 'face_squat'] as const;

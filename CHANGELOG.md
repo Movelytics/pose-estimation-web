@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.4] — 2026-09-29
+
+### Changed
+
+- Handshake `sdkVersion` is `0.3.4`, aligned with the React Native SDKs.
+- The iOS VisionCamera autolinking fix ships only in the React Native packages. This web package has no native pod.
+
+## [0.3.3] — 2026-09-29
+
+### Added
+
+- `back_flexibility_test` in the V4-only exercise list.
+- `analysis` on counter and rep summaries.
+- `disclaimer` and `method` on the exercise summary when the movement emits a report.
+- Form grade `E`.
+- Handshake `sdkVersion` is `0.3.3` (it had stayed at `0.3.1`).
+
 ## [0.3.1] — 2026-09-08
 
 ### Changed

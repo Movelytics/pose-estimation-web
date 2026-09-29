@@ -138,6 +138,7 @@ export function toClassicNativeMessage(event: PoseTrackerEvent): ClassicNativeMe
         ...(event.referenceScore != null
           ? { reference_score: { overallScore: event.referenceScore } }
           : {}),
+        ...(event.analysis != null ? { analysis: event.analysis } : {}),
         timestampMs: event.timestampMs,
       };
     case 'posture':
@@ -182,6 +183,8 @@ export function toClassicNativeMessage(event: PoseTrackerEvent): ClassicNativeMe
         grade: event.grade,
         history: event.history,
         durationMs: event.durationMs,
+        ...(event.disclaimer != null ? { disclaimer: event.disclaimer } : {}),
+        ...(event.method != null ? { method: event.method } : {}),
         timestampMs: event.timestampMs,
       };
     // Custom jump exercises: the classic contract already uses these exact
