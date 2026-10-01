@@ -59,12 +59,20 @@ const SHELL_CSS = `
 }
 .pt-hud.debug { display: block; }
 .pt-placement {
-  position: absolute; z-index: 2; pointer-events: none; display: none;
-  border: 2px dashed rgba(255, 195, 0, 0.85);
-  box-sizing: border-box;
-  border-radius: 4px;
+  position: absolute; inset: 0; z-index: 2; pointer-events: none; display: none;
 }
 .pt-placement.show { display: block; }
+.pt-placement::before {
+  content: "";
+  position: absolute;
+  left: var(--pt-pad, 10%);
+  top: var(--pt-pad, 10%);
+  right: var(--pt-pad, 10%);
+  bottom: var(--pt-pad, 10%);
+  box-sizing: border-box;
+  border: 2px solid #4DD21D;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+}
 `;
 
 let styleInjected = false;
@@ -183,10 +191,7 @@ export function mountDomShell(
       placement.classList.toggle('show', visible);
       if (visible) {
         const p = Math.max(0, Math.min(40, paddingPercent));
-        placement.style.left = `${p}%`;
-        placement.style.top = `${p}%`;
-        placement.style.right = `${p}%`;
-        placement.style.bottom = `${p}%`;
+        placement.style.setProperty('--pt-pad', `${p}%`);
       }
     },
     applyMirror(facingMode) {

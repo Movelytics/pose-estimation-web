@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5] — 2026-10-01
+
+### Changed
+
+- Default placement zone matches the iframe: grayed sides and the PoseTracker frame (`#4DD21D`), replacing the dashed gold box.
+- Handshake `sdkVersion` is `0.3.5`.
+
 ## [0.3.4] — 2026-09-29
 
 ### Changed
