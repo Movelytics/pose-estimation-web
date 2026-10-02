@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6] — 2026-10-02
+
+### Added
+
+- External frames: `warmupExternal()` and `processFrame()`. The page keeps its own camera. The SDK returns keypoints, placement, and rep events and draws nothing.
+- Handshake `sdkVersion` is `0.3.6`.
+
 ## [0.3.5] — 2026-10-01
 
 ### Changed

@@ -45,6 +45,39 @@ Full tables (RN parity, CORS, React): monorepo
 [`docs/MEDIA_SOURCES.md`](../../docs/MEDIA_SOURCES.md) · public
 https://docs.posetracker.com/media-sources
 
+## External frames (your camera, our data)
+
+Full guide (`getUserMedia`, React, native cameras): https://docs.posetracker.com/external-frames
+
+Optional. Use it when your page already owns the camera or the frames (your
+own `<video>`, WebRTC, a canvas pipeline) and you only need the data. No
+`mount()`, no `getUserMedia`, and **nothing is drawn**. Pose estimation and
+the exercise engine run on every frame, and every event you would get from
+the camera flow is emitted: keypoints, posture/placement, counter, form score.
+
+```ts
+const pt = createPoseTracker({ model: 'movenet' });
+await pt.configure('YOUR_API_KEY'); // only needed for exercises
+await pt.warmupExternal();
+pt.startExercise('squat');
+pt.on('counter', (e) => console.log(e.count)); // listeners still fire
+
+// For each frame (ImageBitmap / <img> / <canvas> / <video>, or base64 / uri):
+const { dropped, pose, events } = await pt.processFrame({
+  image: bitmap,
+  width: bitmap.width,
+  height: bitmap.height,
+  timestampMs: performance.now(),
+  mirrored: true, // front camera (default)
+});
+```
+
+- One frame in flight at a time: an overlapping call resolves at once with
+  `{ dropped: true, pose: lastPose, events: [] }`.
+- Prefer `image` over `base64`, and keep frames small (longest side about 256 px).
+- The engine is temporal: push frames in order and keep the same session.
+- Don't mix the two flows. `processFrame` throws while `start()` is running.
+
 ## Script tag (CDN)
 
 The IIFE build exposes a **`PoseTracker`** global (`PoseTracker.createPoseTracker`, …).

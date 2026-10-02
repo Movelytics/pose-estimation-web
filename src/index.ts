@@ -149,6 +149,7 @@ export { COCO_KEYPOINT_NAMES } from './types/pose';
 export type { CocoKeypointName, Keypoint, KeypointName, Pose } from './types/pose';
 
 export type { ColdStartMode, PreloadOptions } from './types/preload';
+export type { ExternalFrame, ExternalFrameResult } from './types/externalFrame';
 export type * from './types/events';
 export type * from './types/manifest';
 export type {

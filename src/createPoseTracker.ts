@@ -77,6 +77,7 @@ import type {
   PoseTrackerStatus,
 } from './types/events';
 import type { Pose } from './types/pose';
+import type { ExternalFrame, ExternalFrameResult } from './types/externalFrame';
 
 const MANIFEST_CACHE_KEY = 'session.sealed';
 const ENGINE_VERSION_KEY = 'engine.version';
@@ -148,6 +149,23 @@ function median(arr: number[]): number | null {
   return s[Math.floor(s.length / 2)] ?? null;
 }
 
+async function decodeExternalFrame(frame: ExternalFrame): Promise<ImageBitmap> {
+  const url = frame.base64
+    ? `data:${frame.mime ?? 'image/jpeg'};base64,${frame.base64}`
+    : frame.uri;
+  if (!url) throw new Error('processFrame: pass image, base64, or uri.');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`processFrame: could not load frame (HTTP ${res.status}).`);
+  return createImageBitmap(await res.blob());
+}
+
+function frameInputSize(input: PoseEstimateInput): { width: number; height: number } {
+  if (typeof HTMLCanvasElement !== 'undefined' && input instanceof HTMLCanvasElement) {
+    return { width: input.width, height: input.height };
+  }
+  return mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap);
+}
+
 function facingFromOptions(opts: PoseTrackerClientOptions): 'user' | 'environment' {
   if (opts.facingMode) return opts.facingMode;
   if (opts.position === 'back') return 'environment';
@@ -211,6 +229,11 @@ export class PoseTrackerClient {
   private inferMs: number[] = [];
   private fpsWindow = 0;
   private fpsTimer = 0;
+  /** External frames (opt-in): set by warmupExternal(), never by start(). */
+  private externalReady = false;
+  private lastExternalPose: Pose | null = null;
+  /** Events emitted while one external frame is in flight. */
+  private externalCollector: PoseTrackerEvent[] | null = null;
 
   constructor(apiToken?: string, options: PoseTrackerClientOptions = {}) {
     // Support createPoseTracker(options) where token is inside options.
@@ -456,6 +479,86 @@ export class PoseTrackerClient {
     return this.runOneFrame();
   }
 
+  /**
+   * Opt-in: load the pose model for frames from your own camera. No
+   * `mount()`, no camera, nothing drawn. Idempotent.
+   */
+  async warmupExternal(): Promise<void> {
+    if (this.disposed) throw new Error('PoseTracker disposed');
+    if (this.preloadPromise) {
+      await this.preloadPromise;
+    } else {
+      await this.preload({ coldStart: 'basic' });
+    }
+    await this.ensureAdapter();
+    if (!this.externalReady) {
+      this.externalReady = true;
+      void this.handleCameraStart({
+        backend: this.acceleration.backend ?? 'webgl',
+        profileId: 'external-frames',
+      });
+    }
+  }
+
+  /**
+   * Infer one frame from your own camera and run the active exercise engine
+   * on the same session. Resolves with the pose and the events this frame
+   * produced; those events also reach `on()` listeners. Nothing is drawn.
+   * One frame in flight: a call made while one is running resolves
+   * `{ dropped: true }` at once.
+   */
+  async processFrame(frame: ExternalFrame): Promise<ExternalFrameResult> {
+    if (this.disposed) throw new Error('PoseTracker disposed');
+    if (!this.externalReady || !this.adapter) {
+      throw new Error('processFrame: call warmupExternal() and wait for it to resolve first.');
+    }
+    if (this.running || this.stream) {
+      throw new Error(
+        'processFrame: the SDK camera or a media source is running on this client. External frames and start() cannot run together.',
+      );
+    }
+    if (this.busy) {
+      return { dropped: true, pose: this.lastExternalPose, events: [] };
+    }
+    this.busy = true;
+    const events: PoseTrackerEvent[] = [];
+    this.externalCollector = events;
+    let decoded: ImageBitmap | null = null;
+    try {
+      let input: PoseEstimateInput;
+      if (frame.image) {
+        input = frame.image;
+      } else {
+        decoded = await decodeExternalFrame(frame);
+        input = decoded;
+      }
+      const size = frameInputSize(input);
+      if (!(size.width > 0 && size.height > 0)) {
+        throw new Error('processFrame: frame has no pixels.');
+      }
+      const result = await this.adapter.estimate(input, {
+        facingMode: frame.mirrored === false ? 'environment' : 'user',
+        displayWidth: size.width,
+        displayHeight: size.height,
+        temporalSmooth: true,
+      });
+      if (!result) return { dropped: false, pose: null, events };
+      const pose: Pose = {
+        keypoints: result.keypoints,
+        score: result.score,
+        timestampMs: typeof frame.timestampMs === 'number' ? frame.timestampMs : Date.now(),
+      };
+      this.lastExternalPose = pose;
+      this.ingestPose(pose);
+      this.recordInference(result, size);
+      return { dropped: false, pose, events };
+    } finally {
+      decoded?.close();
+      this.externalCollector = null;
+      this.busy = false;
+    }
+  }
+
   stop(): void {
     this.running = false;
     this.loopToken += 1;
@@ -510,6 +613,9 @@ export class PoseTrackerClient {
     this.lastCameraStartInfo = null;
     this.featureGateReported = { unsupported: false, freeBlock: false, missingToken: false };
     this.keypointsSuppressionLogged = false;
+    this.externalReady = false;
+    this.lastExternalPose = null;
+    this.externalCollector = null;
     this.engine = null;
     this.engineSource = null;
     this.manifest = null;
@@ -1125,45 +1231,56 @@ export class PoseTrackerClient {
       timestampMs: Date.now(),
     };
     this.ingestPose(pose);
+    this.recordInference(
+      result,
+      mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap),
+    );
+    this.revealCamera();
+    return pose;
+  }
+
+  /** Inference timing + the 1 Hz `stats` event (camera and external frames). */
+  private recordInference(
+    result: { inferenceMs: number; keypoints: Pose['keypoints']; score: number },
+    size: { width: number; height: number },
+  ): void {
     this.inferMs.push(result.inferenceMs);
     if (this.inferMs.length > 30) this.inferMs.shift();
     this.fpsWindow += 1;
     const now = performance.now();
-    if (now - this.fpsTimer >= 1000) {
-      const fps = this.fpsWindow;
-      this.fpsWindow = 0;
-      this.fpsTimer = now;
-      const med = median(this.inferMs);
-      this.acceleration.medianInferenceMs = med;
-      const above = result.keypoints.filter((k) => k.score >= 0.3).length;
-      const backend =
-        'getBackend' in this.adapter &&
-        typeof (this.adapter as { getBackend?: () => string | null }).getBackend === 'function'
-          ? (this.adapter as { getBackend: () => string | null }).getBackend()
-          : null;
-      this.acceleration.backend = backend;
-      const size = mediaSize(input as HTMLVideoElement | HTMLImageElement | ImageBitmap);
-      if (this.opts.debugHud) {
-        this.shell.setHud(
-          `${this.resolved.modelId} · ${this.poseSource.type} · ${backend ?? '?'} · ${fps} fps · ${
-            med != null ? Math.round(med) + ' ms' : '?'
-          } · kp≥0.3=${above}/17`,
-          true,
-        );
-      }
-      this.emit({
-        type: 'stats',
-        fps,
-        medianInferenceMs: med,
-        backend,
-        keypointsAbove03: above,
-        meanScore: result.score,
-        videoSize: `${size.width}x${size.height}`,
-        timestampMs: Date.now(),
-      });
+    if (now - this.fpsTimer < 1000) return;
+    const fps = this.fpsWindow;
+    this.fpsWindow = 0;
+    this.fpsTimer = now;
+    const med = median(this.inferMs);
+    this.acceleration.medianInferenceMs = med;
+    const above = result.keypoints.filter((k) => k.score >= 0.3).length;
+    const adapter = this.adapter;
+    const backend =
+      adapter &&
+      'getBackend' in adapter &&
+      typeof (adapter as { getBackend?: () => string | null }).getBackend === 'function'
+        ? (adapter as { getBackend: () => string | null }).getBackend()
+        : null;
+    this.acceleration.backend = backend;
+    if (this.opts.debugHud && this.shell) {
+      this.shell.setHud(
+        `${this.resolved.modelId} · ${this.poseSource.type} · ${backend ?? '?'} · ${fps} fps · ${
+          med != null ? Math.round(med) + ' ms' : '?'
+        } · kp≥0.3=${above}/17`,
+        true,
+      );
     }
-    this.revealCamera();
-    return pose;
+    this.emit({
+      type: 'stats',
+      fps,
+      medianInferenceMs: med,
+      backend,
+      keypointsAbove03: above,
+      meanScore: result.score,
+      videoSize: `${size.width}x${size.height}`,
+      timestampMs: Date.now(),
+    });
   }
 
   private async loop(token: number): Promise<void> {
@@ -1570,6 +1687,7 @@ export class PoseTrackerClient {
   }
 
   private emit(event: PoseTrackerEvent): void {
+    this.externalCollector?.push(event);
     this.listeners.forEach((l) => {
       try {
         l(event);
