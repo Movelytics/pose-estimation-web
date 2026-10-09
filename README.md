@@ -2,9 +2,11 @@ PoseTracker is a real-time pose estimation SDK and API for fitness and rehab app
 
 [![npm](https://img.shields.io/npm/v/@pose-tracker/pose-estimation-web)](https://www.npmjs.com/package/@pose-tracker/pose-estimation-web)
 
-Guide: https://www.posetracker.com/news/react-native-pose-estimation-expo
+Guide: https://www.posetracker.com/news/javascript-react-pose-estimation-sdk
 
-Docs: https://docs.posetracker.com/quickstart
+Docs: https://docs.posetracker.com/web-sdks
+
+React Native: https://www.posetracker.com/news/react-native-pose-estimation-expo
 
 # `@pose-tracker/pose-estimation-web`
 
