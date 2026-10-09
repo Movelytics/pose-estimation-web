@@ -1,7 +1,7 @@
 {
   "name": "@pose-tracker/pose-estimation-web",
   "version": "0.3.6",
-  "description": "PoseTracker web pose estimation SDK (vanilla) — MoveNet via TensorFlow.js + remote model URL. Exercise engine via API token. No bundled weights.",
+  "description": "PoseTracker is a real-time pose estimation SDK and API for fitness and rehab apps. It runs MoveNet on-device on React Native, iOS, Android and the web. Keypoints are free. An optional API key adds rep counting, joint angles and a form score.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -52,7 +52,7 @@
     "url": "https://www.posetracker.com"
   },
   "license": "SEE LICENSE IN LICENSE",
-  "homepage": "https://github.com/Movelytics/pose-estimation-web#readme",
+  "homepage": "https://www.posetracker.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Movelytics/pose-estimation-web.git"
